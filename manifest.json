@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "YT AdShield – Chặn quảng cáo YouTube",
+  "version": "1.0.0",
+  "description": "Chặn và ẩn quảng cáo trên YouTube ở lớp dữ liệu để hạn chế bị phát hiện ad-block. Dùng cho mục đích cá nhân.",
+  "minimum_chrome_version": "121",
+  "permissions": ["declarativeNetRequest"],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "yt_ads",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content/main-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content/isolate.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start"
+    }
+  ]
+}
