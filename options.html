@@ -7,14 +7,12 @@
     :root { color-scheme: light dark; }
     body {
       font-family: system-ui, "Segoe UI", sans-serif;
-      max-width: 680px;
+      max-width: 640px;
       margin: 32px auto;
       padding: 0 16px;
       line-height: 1.55;
     }
     h1 { font-size: 20px; }
-    h2 { font-size: 14px; margin: 0 0 4px; }
-    .ver { opacity: 0.6; font-weight: 400; font-size: 12px; }
     fieldset {
       border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
       border-radius: 10px;
@@ -29,9 +27,7 @@
       margin: 10px 0;
       cursor: pointer;
     }
-    label.check.small { margin: 6px 0 6px 28px; font-size: 14px; }
     label.check small { opacity: 0.7; }
-    label.check.off { opacity: 0.45; }
     textarea {
       width: 100%;
       min-height: 90px;
@@ -52,21 +48,14 @@
     #status { opacity: 0; transition: opacity 0.2s; }
     #status.show { opacity: 0.85; }
     code { font-family: ui-monospace, Consolas, monospace; font-size: 0.92em; }
-    #total { font-weight: 700; }
   </style>
 </head>
 <body>
-  <h1>YT AdShield – Cài đặt <span class="ver">v1.2</span></h1>
+  <h1>YT AdShield – Cài đặt</h1>
   <p>Bấm icon extension trên thanh công cụ cũng mở trang này.</p>
 
-  <p>Số quảng cáo / dữ liệu quảng cáo đã bị cắt: <span id="total">…</span></p>
-
   <fieldset>
-    <legend>Tính năng chính</legend>
-    <label class="check">
-      <input type="checkbox" id="noAdFlag" />
-      <span>Ra lệnh server không trả quảng cáo <small>(<code>isInlinePlaybackNoAd</code> – chống cả "fake buffering" làm chậm video)</small></span>
-    </label>
+    <legend>Tính năng</legend>
     <label class="check">
       <input type="checkbox" id="cosmetic" />
       <span>Ẩn quảng cáo giao diện <small>(feed, kết quả tìm kiếm, masthead, popup Premium…)</small></span>
@@ -79,28 +68,10 @@
       <input type="checkbox" id="autoPlay" />
       <span>Tự phát lại video khi player cố dừng vì cảnh báo</span>
     </label>
-  </fieldset>
-
-  <fieldset>
-    <legend>Bỏ qua phân đoạn (SponsorBlock)</legend>
     <label class="check">
-      <input type="checkbox" id="sbEnabled" />
-      <span>Tự bỏ qua phân đoạn theo dữ liệu cộng đồng <small>(chỉ gửi videoId tới <code>sponsor.ajay.app</code>)</small></span>
+      <input type="checkbox" id="noAdFlag" />
+      <span>Ra lệnh server không trả quảng cáo <small>(<code>isInlinePlaybackNoAd</code> – chống cả "fake buffering" làm chậm video)</small></span>
     </label>
-    <div id="catList">
-      <label class="check small"><input type="checkbox" data-cat="sponsor" /> Nhà tài trợ – đoạn quảng cáo của bên thứ ba trong video</label>
-      <label class="check small"><input type="checkbox" data-cat="selfpromo" /> Tự quảng bá – merch, kênh khác, quyên góp</label>
-      <label class="check small"><input type="checkbox" data-cat="interaction" /> Kêu gọi tương tác – nhắc like / đăng ký</label>
-      <label class="check small"><input type="checkbox" data-cat="intro" /> Mở đầu / intro</label>
-      <label class="check small"><input type="checkbox" data-cat="outro" /> Kết thúc / outro</label>
-      <label class="check small"><input type="checkbox" data-cat="preview" /> Xem trước / tóm tắt</label>
-    </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>Chặn thêm domain (mạng)</legend>
-    <p>Thêm domain cần chặn ngoài danh sách sẵn có, mỗi dòng một domain:</p>
-    <textarea id="extraDomains" spellcheck="false" placeholder="vd: example-ads.com"></textarea>
   </fieldset>
 
   <fieldset>

@@ -54,15 +54,6 @@
     }
   },
   {
-    "id": 13,
-    "priority": 1,
-    "action": { "type": "block" },
-    "condition": {
-      "urlFilter": "||youtube.com/ptracking",
-      "resourceTypes": ["xmlhttprequest", "ping", "other"]
-    }
-  },
-  {
     "id": 14,
     "priority": 1,
     "action": { "type": "block" },
