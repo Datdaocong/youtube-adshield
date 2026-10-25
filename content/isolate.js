@@ -1,8 +1,12 @@
 /*
- * YT AdShield v1.1 – isolated-world script.
+ * YT AdShield v1.2 – isolated-world script.
  * - Nạp cấu hình từ trang options (chrome.storage) và bơm vào main world.
  * - Bơm CSS ẩn quảng cáo (bật/tắt được lúc chạy).
- * - Tự đóng hộp thoại "phát hiện ad-block" / upsell Premium, giữ video phát.
+ * - Tự đóng hộp thoại "phát hiện ad-block" / "bị gián đoạn" / upsell Premium,
+ *   giữ video phát.
+ * - SponsorBlock: tự bỏ qua phân đoạn tài trợ/tự quảng bá/kêu gọi tương tác
+ *   (dữ liệu cộng đồng, lấy qua background service worker).
+ * - Nhận thống kê từ main world và gửi lên background để hiện badge.
  */
 (() => {
   'use strict';
@@ -13,6 +17,18 @@
     autoPlay: true,
     noAdFlag: true,
     extraKeys: [],
+    sbEnabled: true,
+    sbCategories: ['sponsor', 'selfpromo', 'interaction'],
+    extraDomains: [],
+  };
+
+  const CATEGORY_LABELS = {
+    sponsor: 'Nhà tài trợ',
+    selfpromo: 'Tự quảng bá',
+    interaction: 'Kêu gọi tương tác',
+    intro: 'Mở đầu',
+    outro: 'Kết thúc',
+    preview: 'Xem trước / tóm tắt',
   };
 
   const CSS = `
@@ -52,6 +68,7 @@ ytm-companion-ad-renderer {
   const BACKDROP_SELECTOR = 'tp-yt-iron-overlay-backdrop';
   const PREMIUM_UPSELL_SELECTOR =
     'ytd-popup-container tp-yt-paper-dialog:has(yt-mealbar-promo-renderer)';
+  const INTERRUPTION_RE = /experiencing interruptions|bị gián đoạn|gián đoạn khi phát/i;
 
   let config = { ...DEFAULTS };
   let styleEl = null;
@@ -88,6 +105,35 @@ ytm-companion-ad-renderer {
     }
   };
 
+  // ---- Thống kê từ main world -> badge (gộp mỗi 2s cho nhẹ) ----
+  let pendingStat = 0;
+  let statTimer = null;
+  window.addEventListener(
+    'message',
+    (event) => {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.__ytadshieldStat !== true) return;
+      if (typeof data.delta !== 'number' || data.delta <= 0) return;
+      pendingStat += Math.min(data.delta, 500);
+      if (!statTimer) statTimer = setTimeout(flushStat, 2000);
+    },
+    true
+  );
+  const flushStat = () => {
+    statTimer = null;
+    const delta = pendingStat;
+    pendingStat = 0;
+    if (delta <= 0) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'ytadshield:stat', delta }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (e) {
+      /* bỏ qua */
+    }
+  };
+
   // ---- Dọn hộp thoại chống-adblock & giữ video phát ----
   const keepPlaying = () => {
     for (const video of document.querySelectorAll('video')) {
@@ -114,6 +160,20 @@ ytm-companion-ad-renderer {
       node.remove();
       removed = true;
     }
+    // Hộp thoại "Experiencing interruptions?" (đi kèm cơ chế fake buffering).
+    for (const dlg of document.querySelectorAll(
+      'ytd-popup-container tp-yt-paper-dialog, ytd-popup-container ytd-dialog'
+    )) {
+      try {
+        const text = dlg.textContent || '';
+        if (text.length < 500 && INTERRUPTION_RE.test(text)) {
+          dlg.remove();
+          removed = true;
+        }
+      } catch (e) {
+        /* bỏ qua */
+      }
+    }
     if (removed) {
       lastHit = Date.now();
       for (const node of document.querySelectorAll(BACKDROP_SELECTOR)) node.remove();
@@ -137,6 +197,7 @@ ytm-companion-ad-renderer {
     observer.observe(document.documentElement || document, { childList: true, subtree: true });
     applyCosmetic();
     sweep();
+    refreshSegments();
   };
   if (document.documentElement) start();
   else document.addEventListener('readystatechange', start, { once: true });
@@ -167,6 +228,97 @@ ytm-companion-ad-renderer {
     else if (config.autoPlay && Date.now() - lastHit < 15000) keepPlaying();
   }, 1000);
 
+  // ==================== SponsorBlock: tự bỏ qua phân đoạn ====================
+  let videoId = '';
+  let segments = [];
+
+  const getVideoId = () => {
+    try {
+      const v = new URLSearchParams(location.search).get('v');
+      if (v) return v;
+      const m = location.pathname.match(/^\/shorts\/([\w-]{5,})/);
+      return m ? m[1] : '';
+    } catch (e) {
+      return '';
+    }
+  };
+
+  const activeCategories = () =>
+    config.sbEnabled && Array.isArray(config.sbCategories) ? config.sbCategories : [];
+
+  const refreshSegments = () => {
+    videoId = getVideoId();
+    segments = [];
+    const cats = activeCategories();
+    if (!config.sbEnabled || !videoId || cats.length === 0) return;
+    try {
+      const res = chrome.runtime.sendMessage({
+        type: 'ytadshield:getSegments',
+        videoId,
+        categories: cats,
+      });
+      Promise.resolve(res)
+        .then((reply) => {
+          if (reply && Array.isArray(reply.segments) && getVideoId() === videoId) {
+            segments = reply.segments;
+          }
+        })
+        .catch(() => {});
+    } catch (e) {
+      /* bỏ qua */
+    }
+  };
+
+  let toastEl = null;
+  let toastTimer = null;
+  const showToast = (category) => {
+    try {
+      if (!toastEl || !toastEl.isConnected) {
+        toastEl = document.createElement('div');
+        toastEl.id = 'yt-adshield-toast';
+        toastEl.style.cssText =
+          'position:fixed;left:16px;bottom:16px;z-index:2147483647;' +
+          'background:rgba(24,24,24,.95);color:#fff;padding:10px 14px;border-radius:8px;' +
+          'font:13px/1.4 system-ui,"Segoe UI",sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);' +
+          'opacity:0;transition:opacity .25s;pointer-events:none;';
+        (document.body || document.documentElement).appendChild(toastEl);
+      }
+      toastEl.textContent = '⏩ Đã bỏ qua: ' + (CATEGORY_LABELS[category] || category);
+      toastEl.style.opacity = '1';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        if (toastEl) toastEl.style.opacity = '0';
+      }, 2500);
+    } catch (e) {
+      /* bỏ qua */
+    }
+  };
+
+  let lastSkipAt = 0;
+  const onTimeUpdate = (event) => {
+    if (!segments.length || Date.now() - lastSkipAt < 300) return;
+    const video = event.target;
+    if (!video || video.tagName !== 'VIDEO' || !video.duration || video.paused) return;
+    if (!video.classList.contains('html5-main-video')) return;
+    if (video.closest('ytd-inline-preview-player')) return;
+
+    const t = video.currentTime;
+    for (const seg of segments) {
+      if (t >= seg.start - 0.25 && t < seg.end - 0.35 && seg.end < video.duration - 0.4) {
+        lastSkipAt = Date.now();
+        try {
+          video.currentTime = seg.end + 0.05;
+        } catch (e) {
+          return;
+        }
+        showToast(seg.category);
+        break;
+      }
+    }
+  };
+  document.addEventListener('timeupdate', onTimeUpdate, true);
+  document.addEventListener('yt-navigate-finish', refreshSegments, true);
+
   // ---- Nạp + theo dõi cấu hình ----
   const load = () => {
     try {
@@ -174,6 +326,7 @@ ytm-companion-ad-renderer {
         config = Object.assign({}, DEFAULTS, items || {});
         applyCosmetic();
         sendConfig();
+        refreshSegments();
       });
     } catch (e) {
       applyCosmetic();
@@ -188,6 +341,7 @@ ytm-companion-ad-renderer {
       for (const [key, change] of Object.entries(changes)) config[key] = change.newValue;
       applyCosmetic();
       sendConfig();
+      refreshSegments();
     });
   } catch (e) {
     /* bỏ qua */

@@ -1,5 +1,5 @@
 /*
- * YT AdShield v1.1 – main-world script (chạy TRƯỚC mọi script của YouTube,
+ * YT AdShield v1.2 – main-world script (chạy TRƯỚC mọi script của YouTube,
  * kể cả "locker script" anti-tamper mà YouTube chèn đầu <head>).
  *
  * Chiến lược "không bị phát hiện":
@@ -12,6 +12,7 @@
  *  3. Gỡ quảng cáo Shorts (entry có reelWatchEndpoint.adClientParams.isAd).
  *  4. Mọi hàm bị đè đều được ngụy trang "trông như native" (toString/name/length)
  *     để qua mặt các integrity check.
+ *  5. Báo về isolate world số phần tử quảng cáo đã cắt (để hiện badge).
  */
 (() => {
   'use strict';
@@ -60,15 +61,16 @@
     }
   };
 
-  const prune = (node, depth = 0) => {
+  const prune = (node, stats, depth = 0) => {
     if (!node || typeof node !== 'object' || depth > 40) return;
     if (Array.isArray(node)) {
       for (let i = node.length - 1; i >= 0; i--) {
         if (isShortsAdEntry(node[i])) {
           node.splice(i, 1);
+          stats.removed++;
           continue;
         }
-        prune(node[i], depth + 1);
+        prune(node[i], stats, depth + 1);
       }
       return;
     }
@@ -76,9 +78,10 @@
       if (!hasOwn.call(node, key)) continue;
       if (AD_KEYS.has(key)) {
         delete node[key];
+        stats.removed++;
         continue;
       }
-      prune(node[key], depth + 1);
+      prune(node[key], stats, depth + 1);
     }
   };
 
@@ -94,12 +97,31 @@
     return false;
   };
 
+  // Báo số phần tử quảng cáo đã cắt về isolate world (badge đếm).
+  const notifyPrune = (delta) => {
+    try {
+      window.postMessage({ __ytadshieldStat: true, delta }, '*');
+    } catch (e) {
+      /* bỏ qua */
+    }
+  };
+
+  const pruneTree = (root) => {
+    try {
+      const stats = { removed: 0 };
+      prune(root, stats, 0);
+      if (stats.removed > 0) notifyPrune(stats.removed);
+    } catch (e) {
+      /* không bao giờ để lỗi làm vỡ trang */
+    }
+  };
+
   // ========== Bắt JSON.parse ==========
   const origParse = JSON.parse;
   const parsePatch = function parse(text, reviver) {
     const data = origParse.call(JSON, text, reviver);
     try {
-      if (typeof text === 'string' && text.length < 20000000 && hasMarker(text)) prune(data);
+      if (typeof text === 'string' && text.length < 20000000 && hasMarker(text)) pruneTree(data);
     } catch (e) {
       /* không bao giờ để lỗi làm vỡ trang */
     }
@@ -140,7 +162,7 @@
   const jsonPatch = async function json() {
     const data = await origJson.call(this);
     try {
-      if (this.url && this.url.includes('/youtubei/')) prune(data);
+      if (this.url && this.url.includes('/youtubei/')) pruneTree(data);
     } catch (e) {
       /* bỏ qua */
     }
@@ -163,7 +185,7 @@
     this.addEventListener('load', () => {
       try {
         if (this.responseType === 'json' && this.__ytAdUrl.includes('/youtubei/')) {
-          prune(this.response);
+          pruneTree(this.response);
         }
       } catch (e) {
         /* bỏ qua */
@@ -200,7 +222,7 @@
         },
         set(value) {
           try {
-            if (value && typeof value === 'object') prune(value);
+            if (value && typeof value === 'object') pruneTree(value);
           } catch (e) {
             /* bỏ qua */
           }
@@ -223,9 +245,9 @@
       trap('ytInitialPlayerResponse');
       trap('ytInitialData');
       const pr = window.ytInitialPlayerResponse;
-      if (pr && typeof pr === 'object') prune(pr);
+      if (pr && typeof pr === 'object') pruneTree(pr);
       if (window.ytInitialData && typeof window.ytInitialData === 'object') {
-        prune(window.ytInitialData);
+        pruneTree(window.ytInitialData);
       }
     } catch (e) {
       /* bỏ qua */
