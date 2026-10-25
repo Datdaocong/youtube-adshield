@@ -79,6 +79,23 @@ youtube-adshield/
 - Mỗi tính năng đều bật/tắt được ở trang cài đặt — nếu một cơ chế mới của
   YouTube phản tác dụng, tắt đúng nút để khoanh vùng.
 
+## Hiệu năng (v1.2.1)
+
+Bản 1.2 có lag khi chuyển video do hai chỗ: quét đệ quy TOÀN BỘ cây JSON
+(1–3MB, hàng trăm nghìn node) của mọi response Innertube, và MutationObserver
+quét toàn bộ DOM với selector `:has()` ở mọi frame. Đã sửa:
+
+- **Cắt theo đường dẫn đích** (đúng bộ đường dẫn mà uBlock Origin dùng:
+  gốc + `playerResponse.*` + `entries[]` Shorts) — mỗi response tốn vài phép
+  đọc thuộc tính bất kể dung lượng, thay vì đi hàng trăm nghìn node.
+- **Quét sâu chỉ là dự phòng**: chỉ chạy khi payload < 500KB và marker có mặt
+  mà đường dẫn chuẩn không cắt được gì — payload lớn không bao giờ bị quét.
+- **Marker kiểm tra bằng một regex** quét một lượt thay vì nhiều lần
+  `includes()` trên chuỗi lớn.
+- **MutationObserver có cổng**: chỉ dọn popup khi tag popup xuất hiện hoặc
+  mutation xảy ra trong `ytd-popup-container`; truy vấn hộp thoại có phạm vi,
+  không dùng `:has()` trong đường nóng.
+
 ## Hạn chế cần biết
 
 - **Quảng cáo ghép server-side (SSAI/SAI)** — quảng cáo nhúng thẳng vào luồng

@@ -1,5 +1,5 @@
 /*
- * YT AdShield v1.2 – isolated-world script.
+ * YT AdShield v1.2.1 – isolated-world script.
  * - Nạp cấu hình từ trang options (chrome.storage) và bơm vào main world.
  * - Bơm CSS ẩn quảng cáo (bật/tắt được lúc chạy).
  * - Tự đóng hộp thoại "phát hiện ad-block" / "bị gián đoạn" / upsell Premium,
@@ -7,6 +7,13 @@
  * - SponsorBlock: tự bỏ qua phân đoạn tài trợ/tự quảng bá/kêu gọi tương tác
  *   (dữ liệu cộng đồng, lấy qua background service worker).
  * - Nhận thống kê từ main world và gửi lên background để hiện badge.
+ *
+ * Hiệu năng (v1.2.1 – sửa lag khi chuyển video):
+ *  - MutationObserver chỉ kích hoạt dọn dẹp khi mutation liên quan popup
+ *    (tag popup xuất hiện hoặc target nằm trong ytd-popup-container), thay vì
+ *    quét toàn bộ DOM ở mọi frame.
+ *  - Các truy vấn hộp thoại giới hạn trong ytd-popup-container, không dùng
+ *    selector :has() trong đường nóng.
  */
 (() => {
   'use strict';
@@ -47,9 +54,7 @@ ytd-carousel-ad-renderer,
 ytd-brand-video-singleton-renderer,
 ytd-brand-video-shelf-renderer,
 ytd-rich-section-renderer:has(ytd-ad-slot-renderer),
-ytd-rich-section-renderer:has(ytd-display-ad-renderer),
 ytd-rich-item-renderer:has(> #content > ytd-ad-slot-renderer),
-ytd-rich-shelf-renderer:has(ytd-display-ad-renderer),
 ytd-search-pyv-renderer,
 ytd-video-renderer:has(ytd-ad-slot-renderer),
 ytd-compact-video-renderer:has(ytd-ad-slot-renderer),
@@ -66,9 +71,18 @@ ytm-companion-ad-renderer {
 
   const ENFORCEMENT_SELECTOR = 'ytd-enforcement-message-view-model';
   const BACKDROP_SELECTOR = 'tp-yt-iron-overlay-backdrop';
-  const PREMIUM_UPSELL_SELECTOR =
-    'ytd-popup-container tp-yt-paper-dialog:has(yt-mealbar-promo-renderer)';
+  const POPUP_CONTAINER_SELECTOR = 'ytd-popup-container';
+  const DIALOG_SELECTOR = 'tp-yt-paper-dialog, ytd-dialog';
   const INTERRUPTION_RE = /experiencing interruptions|bị gián đoạn|gián đoạn khi phát/i;
+
+  // Tag "liên quan popup" – mutation nào chứa một trong các tag này mới cần sweep.
+  const POPUP_TAGS = new Set([
+    'ytd-enforcement-message-view-model',
+    'tp-yt-paper-dialog',
+    'ytd-dialog',
+    'tp-yt-iron-overlay-backdrop',
+    'yt-mealbar-promo-renderer',
+  ]);
 
   let config = { ...DEFAULTS };
   let styleEl = null;
@@ -156,15 +170,15 @@ ytm-companion-ad-renderer {
       node.remove();
       removed = true;
     }
-    for (const node of document.querySelectorAll(PREMIUM_UPSELL_SELECTOR)) {
-      node.remove();
-      removed = true;
-    }
-    // Hộp thoại "Experiencing interruptions?" (đi kèm cơ chế fake buffering).
-    for (const dlg of document.querySelectorAll(
-      'ytd-popup-container tp-yt-paper-dialog, ytd-popup-container ytd-dialog'
-    )) {
+    // Hộp thoại chỉ nằm trong popup container – quét có phạm vi, không dùng :has().
+    const popup = document.querySelector(POPUP_CONTAINER_SELECTOR);
+    for (const dlg of (popup || document).querySelectorAll(DIALOG_SELECTOR)) {
       try {
+        if (dlg.querySelector('yt-mealbar-promo-renderer')) {
+          dlg.remove();
+          removed = true;
+          continue;
+        }
         const text = dlg.textContent || '';
         if (text.length < 500 && INTERRUPTION_RE.test(text)) {
           dlg.remove();
@@ -183,14 +197,27 @@ ytm-companion-ad-renderer {
     }
   };
 
+  const isRelevantMutation = (m) => {
+    for (const node of m.addedNodes) {
+      if (node.nodeType === 1 && POPUP_TAGS.has(node.localName)) return true;
+    }
+    const t = m.target;
+    return !!(t && t.nodeType === 1 && t.closest && t.closest(POPUP_CONTAINER_SELECTOR));
+  };
+
   let scheduled = false;
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((mutations) => {
     if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(() => {
-      scheduled = false;
-      sweep();
-    });
+    for (const m of mutations) {
+      if (isRelevantMutation(m)) {
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          sweep();
+        });
+        break;
+      }
+    }
   });
 
   const start = () => {
@@ -199,8 +226,6 @@ ytm-companion-ad-renderer {
     sweep();
     refreshSegments();
   };
-  if (document.documentElement) start();
-  else document.addEventListener('readystatechange', start, { once: true });
 
   // Nếu player vẫn cố pause khi vừa có cảnh báo -> phát lại ngay.
   document.addEventListener(
@@ -224,8 +249,17 @@ ytm-companion-ad-renderer {
   // Vòng dự phòng trong 2 phút sau lần gần nhất phát hiện cảnh báo.
   setInterval(() => {
     if (Date.now() - lastHit > 120000) return;
-    if (config.killEnforcement && document.querySelector(ENFORCEMENT_SELECTOR)) sweep();
-    else if (config.autoPlay && Date.now() - lastHit < 15000) keepPlaying();
+    const popupDialogOpen = !!document.querySelector(
+      POPUP_CONTAINER_SELECTOR + ' ' + DIALOG_SELECTOR
+    );
+    if (
+      config.killEnforcement &&
+      (document.querySelector(ENFORCEMENT_SELECTOR) || popupDialogOpen)
+    ) {
+      sweep();
+    } else if (config.autoPlay && Date.now() - lastHit < 15000) {
+      keepPlaying();
+    }
   }, 1000);
 
   // ==================== SponsorBlock: tự bỏ qua phân đoạn ====================
@@ -346,4 +380,8 @@ ytm-companion-ad-renderer {
   } catch (e) {
     /* bỏ qua */
   }
+
+  // Khởi động sau khi mọi hàm đã được khai báo.
+  if (document.documentElement) start();
+  else document.addEventListener('readystatechange', start, { once: true });
 })();

@@ -1,5 +1,5 @@
 /*
- * YT AdShield v1.2 – main-world script (chạy TRƯỚC mọi script của YouTube,
+ * YT AdShield v1.2.1 – main-world script (chạy TRƯỚC mọi script của YouTube,
  * kể cả "locker script" anti-tamper mà YouTube chèn đầu <head>).
  *
  * Chiến lược "không bị phát hiện":
@@ -13,11 +13,19 @@
  *  4. Mọi hàm bị đè đều được ngụy trang "trông như native" (toString/name/length)
  *     để qua mặt các integrity check.
  *  5. Báo về isolate world số phần tử quảng cáo đã cắt (để hiện badge).
+ *
+ * Hiệu năng (v1.2.1 – sửa lag khi chuyển video):
+ *  - Cắt theo ĐƯỜNG DẤN ĐÍCH (theo uAssets quick-fixes) thay vì đi đệ quy toàn
+ *    cây JSON: mỗi response chỉ tốn vài phép đọc thuộc tính, bất kể dung lượng.
+ *  - Quét sâu chỉ chạy dự phòng khi chuỗi nhỏ (<500KB) và marker có mặt mà
+ *    đường dẫn chuẩn không cắt được gì — không bao giờ chạm payload lớn.
+ *  - Marker kiểm tra bằng MỘT regex quét một lượt thay vì nhiều lần includes().
  */
 (() => {
   'use strict';
 
   const AD_KEYS = new Set(['adPlacements', 'adSlots', 'playerAds']);
+  const AD_KEYS_LIST = ['adPlacements', 'adSlots', 'playerAds'];
   let noAdFlag = true;
 
   const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
@@ -61,7 +69,39 @@
     }
   };
 
-  const prune = (node, stats, depth = 0) => {
+  const deleteKeys = (obj, keys) => {
+    let n = 0;
+    for (const key of keys) {
+      if (hasOwn.call(obj, key)) {
+        delete obj[key];
+        n++;
+      }
+    }
+    return n;
+  };
+
+  // Cắt theo đường dẫn chuẩn (rẻ, O(số đường dẫn) bất kể kích thước payload):
+  // - gốc: adPlacements / adSlots / playerAds  (response của /player)
+  // - playerResponse.*                        (response của /next, ytInitialData)
+  // - entries[]: entry Shorts quảng cáo
+  const scrub = (root) => {
+    if (!root || typeof root !== 'object') return 0;
+    let removed = deleteKeys(root, AD_KEYS_LIST);
+    const inner = root.playerResponse;
+    if (inner && typeof inner === 'object') removed += deleteKeys(inner, AD_KEYS_LIST);
+    if (Array.isArray(root.entries)) {
+      for (let i = root.entries.length - 1; i >= 0; i--) {
+        if (isShortsAdEntry(root.entries[i])) {
+          root.entries.splice(i, 1);
+          removed++;
+        }
+      }
+    }
+    return removed;
+  };
+
+  // Quét sâu dự phòng – chỉ chạy cho payload nhỏ để không gây lag.
+  const deepPrune = (node, stats, depth = 0) => {
     if (!node || typeof node !== 'object' || depth > 40) return;
     if (Array.isArray(node)) {
       for (let i = node.length - 1; i >= 0; i--) {
@@ -70,7 +110,7 @@
           stats.removed++;
           continue;
         }
-        prune(node[i], stats, depth + 1);
+        deepPrune(node[i], stats, depth + 1);
       }
       return;
     }
@@ -81,23 +121,20 @@
         stats.removed++;
         continue;
       }
-      prune(node[key], stats, depth + 1);
+      deepPrune(node[key], stats, depth + 1);
     }
   };
 
-  // Marker để soát nhanh chuỗi JSON trước khi prune (tránh đi cây trên data không liên quan).
-  // "reelWatchEndpoint" là dấu hiệu dữ liệu Shorts (quảng cáo Shorts đánh dấu qua isAd).
+  // Marker: MỘT regex quét một lượt (thay vì nhiều lần includes trên chuỗi lớn).
   const MARKERS = new Set(['"reelWatchEndpoint"']);
   for (const key of AD_KEYS) MARKERS.add('"' + key + '"');
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const buildMarkerRe = () =>
+    new RegExp(Array.from(MARKERS).map(escapeRe).join('|'));
+  let MARKER_RE = buildMarkerRe();
 
-  const hasMarker = (text) => {
-    for (const marker of MARKERS) {
-      if (text.includes(marker)) return true;
-    }
-    return false;
-  };
+  const DEEP_SCAN_LIMIT = 500000; // chỉ quét sâu payload < 500KB
 
-  // Báo số phần tử quảng cáo đã cắt về isolate world (badge đếm).
   const notifyPrune = (delta) => {
     try {
       window.postMessage({ __ytadshieldStat: true, delta }, '*');
@@ -106,11 +143,19 @@
     }
   };
 
-  const pruneTree = (root) => {
+  const scrubTree = (root, fullScanText) => {
     try {
-      const stats = { removed: 0 };
-      prune(root, stats, 0);
-      if (stats.removed > 0) notifyPrune(stats.removed);
+      let removed = scrub(root);
+      if (
+        removed === 0 &&
+        typeof fullScanText === 'string' &&
+        fullScanText.length < DEEP_SCAN_LIMIT
+      ) {
+        const stats = { removed: 0 };
+        deepPrune(root, stats, 0);
+        removed = stats.removed;
+      }
+      if (removed > 0) notifyPrune(removed);
     } catch (e) {
       /* không bao giờ để lỗi làm vỡ trang */
     }
@@ -121,7 +166,9 @@
   const parsePatch = function parse(text, reviver) {
     const data = origParse.call(JSON, text, reviver);
     try {
-      if (typeof text === 'string' && text.length < 20000000 && hasMarker(text)) pruneTree(data);
+      if (typeof text === 'string' && text.length < 20000000 && MARKER_RE.test(text)) {
+        scrubTree(data, text);
+      }
     } catch (e) {
       /* không bao giờ để lỗi làm vỡ trang */
     }
@@ -162,7 +209,7 @@
   const jsonPatch = async function json() {
     const data = await origJson.call(this);
     try {
-      if (this.url && this.url.includes('/youtubei/')) pruneTree(data);
+      scrubTree(data);
     } catch (e) {
       /* bỏ qua */
     }
@@ -185,7 +232,7 @@
     this.addEventListener('load', () => {
       try {
         if (this.responseType === 'json' && this.__ytAdUrl.includes('/youtubei/')) {
-          pruneTree(this.response);
+          scrubTree(this.response);
         }
       } catch (e) {
         /* bỏ qua */
@@ -222,7 +269,7 @@
         },
         set(value) {
           try {
-            if (value && typeof value === 'object') pruneTree(value);
+            if (value && typeof value === 'object') scrubTree(value);
           } catch (e) {
             /* bỏ qua */
           }
@@ -238,16 +285,16 @@
   trap('ytInitialPlayerResponse');
   trap('ytInitialData');
 
-  // YouTube là SPA – sau mỗi lần điều hướng, kiểm tra lại bẫy và prune nốt dữ
-  // liệu mới gán vào biến toàn cục.
+  // YouTube là SPA – sau mỗi lần điều hướng, kiểm tra lại bẫy và cắt nốt dữ
+  // liệu mới gán vào biến toàn cục (bản thân scrub rất rẻ nên không gây lag).
   const rescrub = () => {
     try {
       trap('ytInitialPlayerResponse');
       trap('ytInitialData');
       const pr = window.ytInitialPlayerResponse;
-      if (pr && typeof pr === 'object') pruneTree(pr);
+      if (pr && typeof pr === 'object') scrubTree(pr);
       if (window.ytInitialData && typeof window.ytInitialData === 'object') {
-        pruneTree(window.ytInitialData);
+        scrubTree(window.ytInitialData);
       }
     } catch (e) {
       /* bỏ qua */
@@ -268,7 +315,9 @@
           for (const key of data.extraKeys) {
             if (typeof key === 'string' && IDENT_RE.test(key) && !AD_KEYS.has(key)) {
               AD_KEYS.add(key);
+              AD_KEYS_LIST.push(key);
               MARKERS.add('"' + key + '"');
+              MARKER_RE = buildMarkerRe();
             }
           }
         }
